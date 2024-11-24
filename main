@@ -1,0 +1,1176 @@
+/* *********************************
+ * Simple recursive descent parser *
+ ***********************************/
+
+/*
+ * The output is an AST rather than a parse tree.
+ *
+ * Limitations: This is obviously no production-ready parser.  The
+ * lexical analysis is primitive.  The error reporting is minimal and
+ * in particular the parser does not make any attempt at recovering
+ * from errors.
+ */
+
+
+
+/*
+ - Need to implement type and scope checking on top of this parser for the assignment.
+ - Result of program should be empty if both checks are correct
+ - Should print errors messages for a type or scope error
+ - Add more attributes and member functions to the AST nodes
+ - No optimization for symbol table
+ 
+ Your type checking should ensure the following:
+ 1. Type consistency for all expressions;
+ 2. Type consistency for all assignment statements;
+ 3. Integer and positive size in the declaration of all the arrays;
+ 4. Integer subscripts for all array access;
+ 5. All the variables are declared before use.
+ 
+ 
+ ------What does this part mean?-----
+ 
+ 
+ Note that the language is defined so that single-pass compilation is possible. However, you
+ are not required to perform any syntax directed translation. You must leave the parser alone and
+ pass the resulting parse tree to another function (or functions) that traverse it and realize the type
+ and scope checking
+ */
+
+#include <list>
+#include <string>
+#include <sstream>
+#include <iostream>
+using namespace std;
+
+/*
+ * Gramar modified for recursive descent parsing (with e standing for
+ * epsilon):
+
+   <program>  ::= <block>
+   <block>    ::= { <decls> <stmts> }
+   <decls>    ::= e
+                | <decl> <decls>
+   <decl>     ::= <type> ID ;
+   <type>     ::= BASIC <typecl>
+   <typecl>   ::= e
+                | [ NUM ] <typecl>
+   <stmts>    ::= e
+                | <stmt> <stmts>
+   <stmt>     ::= <loc> = <bool> ;
+                | IF ( <bool> ) <stmt>
+                | IF ( <bool> ) <stmt> ELSE <stmt>
+                | WHILE ( <bool> ) <stmt>
+                | <block>
+   <loc>      ::= ID <loccl>
+   <loccl>    ::= e
+                | [ <bool> ] <loccl>
+   <bool>     ::= <join> <boolcl>
+   <boolcl>   ::= e
+                | || <join> <boolcl>
+   <join>     ::= <equality> <joincl>
+   <joincl>   ::= e
+                | && <equality> <joincl>
+   <equality> ::= <rel> <equalcl>
+   <equalcl>  ::= e
+                | == <rel> <equalcl>
+                | != <rel> <equalcl>
+   <rel>      ::= <expr> <reltail>
+   <reltail>  ::= e
+                | <= <expr>
+                | >= <expr>
+                | > <expr>
+                | < <expr>
+   <expr>     ::= <term> <exprcl>
+   <exprcl>   ::= e
+                | + <term> <exprcl>
+                | - <term> <exprcl>
+   <term>     ::= <unary> <termcl>
+   <termcl>   ::= e
+                | * <unary> <termcl>
+                | / <unary> <termcl>
+   <unary>    ::= ! <unary>
+                | - <unary>
+                | <factor>
+   <factor>   ::= ( <bool> )
+                | <loc>
+                | NUM
+                | REAL
+                | TRUE
+                | FALSE
+ */
+
+
+/*
+ * Nonterminals (used to label the nodes in the parse tree):
+ */
+enum nonterminal {
+    NT_TERMINAL,
+    NT_PROGRAM,
+    NT_BLOCK,
+    NT_DECLS,
+    NT_DECL,
+    NT_TYPE,
+    NT_TYPECL,
+    NT_STMTS,
+    NT_STMT,
+    NT_LOC,
+    NT_LOCCL,
+    NT_BOOL,
+    NT_BOOLCL,
+    NT_JOIN,
+    NT_JOINCL,
+    NT_EQUALITY,
+    NT_EQUALCL,
+    NT_REL,
+    NT_RELTAIL,
+    NT_EXPR,
+    NT_EXPRCL,
+    NT_TERM,
+    NT_TERMCL,
+    NT_UNARY,
+    NT_FACTOR
+};
+
+/*
+ * Terminal types:
+ */
+enum vocab {
+    VOC_EOS,
+    VOC_OPEN_PAREN,
+    VOC_CLS_PAREN,
+    VOC_OPEN_BRACE,
+    VOC_CLS_BRACE,
+    VOC_OPEN_SQPAR,
+    VOC_CLS_SQPAR,
+    VOC_IF,
+    VOC_ELSE,
+    VOC_WHILE,
+    VOC_ID,
+    VOC_AND,
+    VOC_OR,
+    VOC_ASSIGN,
+    VOC_EQ,
+    VOC_NEQ,
+    VOC_LTEQ,
+    VOC_GTEQ,
+    VOC_LT,
+    VOC_GT,
+    VOC_PLUS,
+    VOC_MINUS,
+    VOC_NUM,
+    VOC_REAL,
+    VOC_TRUE,
+    VOC_FALSE,
+    VOC_NOT,
+    VOC_MUL,
+    VOC_DIV,
+    VOC_BASIC,
+    VOC_SEMICOLON
+};
+
+/*
+ Variable types for variables and functions
+ */
+enum type {
+    // Basic Types
+    TYPE_INT,
+    TYPE_DOUBLE,
+    TYPE_FLOAT,
+    TYPE_CHAR,
+    TYPE_STRING,
+    TYPE_BOOL,
+    TYPE_VOID,
+    
+    // Array Types
+    TYPE_ARRAY,
+    TYPE_INT_ARRAY,
+    TYPE_DOUBLE_ARRAY,
+    TYPE_FLOAT_ARRAY,
+    TYPE_CHAR_ARRAY,
+    TYPE_BOOL_ARRAY,
+    
+    // Expression Types
+    TYPE_ARITHMETIC,
+    TYPE_LOGICAL,
+    TYPE_RELATIONAL,
+    TYPE_EQUALITY,
+    
+    // Special Types
+    TYPE_POINTER,
+    TYPE_NULL,
+    TYPE_ERROR,
+    TYPE_UNKNOWN,
+    
+    // Control Flow Types
+    TYPE_CONDITION,  // For if/while
+    
+    // Operation Types
+    TYPE_ASSIGNMENT,
+    TYPE_INDEX,      // For array indexing
+};
+
+/*
+ * Tokens are structures containing the actual string (the lexeme) and
+ * also the type.
+ */
+struct token {
+    string str;
+    vocab type;
+    token(string str, vocab tok) : str(str), type(tok) { }
+    token() : type(VOC_EOS) { }
+};
+
+/*
+ * Nodes in the parse tree.  The member variable nt contains the
+ * nonterminal label for the node, or NT_TERMINAL if the node is
+ * labelled with a terminal (or token).  For terminal nodes the member
+ * variable term contains the respective token.
+ *
+ * Internal nodes are labelled with nonterminals while leaves are
+ * labelled with either terminals (tokens) or nonterminals that were
+ * rewritten to the empty string.
+ */
+class node {
+    
+private:
+    token term;
+    nonterminal nt;
+    list<node*> children;
+    
+    //Private helper methods that identify proper type for nodes
+    type getBasicType(const string& typeStr) const {
+        if (typeStr == "int") return TYPE_INT;
+        if (typeStr == "float") return TYPE_FLOAT;
+        if (typeStr == "double") return TYPE_DOUBLE;
+        if (typeStr == "bool") return TYPE_BOOL;
+        if (typeStr == "char") return TYPE_CHAR;
+        return TYPE_ERROR;
+    }
+    
+    type getArrayType(type baseType) const {
+            switch(baseType) {
+                case TYPE_INT: return TYPE_INT_ARRAY;
+                case TYPE_FLOAT: return TYPE_FLOAT_ARRAY;
+                case TYPE_DOUBLE: return TYPE_DOUBLE_ARRAY;
+                case TYPE_BOOL: return TYPE_BOOL_ARRAY;
+                case TYPE_CHAR: return TYPE_CHAR_ARRAY;
+                default: return TYPE_ERROR;
+            }
+        }
+
+    type getLiteralType(vocab tokenType) const {
+        switch(tokenType) {
+            case VOC_NUM: return TYPE_INT;
+            case VOC_REAL: return TYPE_DOUBLE;
+            case VOC_TRUE: return TYPE_BOOL;
+            case VOC_FALSE: return TYPE_BOOL;
+            default: return TYPE_ERROR;
+        }
+    }
+
+    type getExpressionType(nonterminal nodeType) const {
+        switch(nodeType) {
+            case NT_BOOL: return TYPE_BOOL;
+            case NT_EXPR: return TYPE_ARITHMETIC;
+            case NT_EQUALITY: return TYPE_EQUALITY;
+            case NT_REL: return TYPE_RELATIONAL;
+            default: return TYPE_ERROR;
+        }
+    }
+public:
+    //Constructors for nodes based on whether they are passed a non terminal or token
+    node(nonterminal n) : nt(n) {  }
+    node(token tok) : term(tok), nt(NT_TERMINAL) {  }
+    
+    //Getter for nonterminal labels
+    nonterminal getNonTerminal() const {
+        return nt;
+    }
+    //Getter for vocab types of tokens
+    vocab getTermType() const{
+        return term.type;
+    }
+    
+    //Type of the node is given during the lexical analysis
+    //Public method for fetching the node type that we can use for type checking
+    //Each node has has an enum property nt that states what kind of node it is
+    //This is as opposed to tokens which are specifically for leaf nodes and wouldn't allow us to verify the type of whole equations or assignations
+    type getType() {
+        switch(nt) {
+            //Node contains directly type -> return type
+            case NT_TYPE:
+                return getBasicType(children.front()->term.str);
+            //In a node declaration the first child is the node that contains the type
+            case NT_DECL:
+                return children.front()->getType();
+            //Handles type of a specific location (variables or arrays)
+            case NT_LOC:
+            {
+                //Checks type if its just a variable
+                type baseType = children.front()->getType();
+                /*
+                 Checks if array to return array type
+                 Based on <loccl>    ::= e
+                 | [ <bool> ] <loccl>  if the second child has children in this clause it should be a list
+                 */
+                if (children.back()->getChildren().empty()){
+                    return baseType;
+                }
+                /*
+                 Gives the array type that should be consistent through the whole array but does not check this
+                 */
+                else
+                {
+                    return getArrayType(baseType);
+                }
+                    
+            }
+                
+            //Get type inference based on value
+            case NT_FACTOR:
+                if (children.front()->isToken()) {
+                    return getLiteralType(children.front()->getTermType());
+                            }
+                    return children.front()->getType();
+            //Get type of expression to facilitate type checking
+            case NT_BOOL:
+            case NT_EXPR:
+            case NT_EQUALITY:
+            case NT_REL:
+                return getExpressionType(nt);
+            
+            default:
+                return  TYPE_ERROR;
+        }
+    }
+    
+    
+    ~node();
+
+    void addChild(node* child) { children.push_back(child); }
+
+    bool isToken() const { return nt == NT_TERMINAL; }
+    bool isNonterminal() const { return !isToken(); }
+
+    void print(unsigned indent) const;
+    
+    //A method that allows the export of the list of children
+    const list<node*>& getChildren() const {
+        return children;
+    }
+    
+    string printVal() const;
+    string printNonterminal(nonterminal) const;
+
+};
+
+node::~node() {
+    for (list<node*>::const_iterator i = children.begin(); i != children.end(); ++i) {
+        delete *i;
+    }
+}
+
+/*
+ * Pretty print functions.
+ */
+
+/*
+ * Prints the value stored in the node (either nonterminal or token):
+ */
+string node::printVal() const {
+    if (!isNonterminal()) {
+        return term.str;
+    } else {
+        return printNonterminal(nt);
+    }
+}
+
+/*
+ * Provides strings for each nonterminal type:
+ */
+string node::printNonterminal(nonterminal nt) const {
+    switch (nt) {
+    case NT_PROGRAM:
+        return "program";
+    case NT_BLOCK:
+        return "block";
+    case NT_DECLS:
+        return "decls";
+    case NT_DECL:
+        return "decl";
+    case NT_TYPE:
+        return "type";
+    case NT_TYPECL:
+        return "typecl";
+    case NT_STMTS:
+        return "stmts";
+    case NT_STMT:
+        return "stmt";
+    case NT_LOC:
+        return "loc";
+    case NT_LOCCL:
+        return "loccl";
+    case NT_BOOL:
+        return "bool";
+    case NT_BOOLCL:
+        return "boolcl";
+    case NT_JOIN:
+        return "join";
+    case NT_JOINCL:
+        return "joincl";
+    case NT_EQUALITY:
+        return "equality";
+    case NT_EQUALCL:
+        return "equalitycl";
+    case NT_REL:
+        return "rel";
+    case NT_RELTAIL:
+        return "reltail";
+    case NT_EXPR:
+        return "expr";
+    case NT_EXPRCL:
+        return "exprcl";
+    case NT_TERM:
+        return "term";
+    case NT_TERMCL:
+        return "termcl";
+    case NT_UNARY:
+        return "unary";
+    case NT_FACTOR:
+        return "factor";
+    default:
+        return "???";  // we will hopefully never reach this...
+    }
+}
+
+/*
+ * Pretty prints the whole parse tree recursively.
+ */
+void node::print(unsigned indent = 0) const {
+    string symbol = printVal();
+    if (isNonterminal())
+        cout << string(indent, ' ') << "<" << symbol << ">" << '\n';
+    else
+        cout << string(indent, ' ') << symbol << '\n';
+    for (list<node*>::const_iterator i = children.begin(); i != children.end(); ++i) {
+        node* child = (*i);
+        child->print(indent + 2);
+    }
+    if (isNonterminal())
+        cout << string(indent, ' ') << "</" << symbol << ">" << '\n';
+}
+
+
+
+/********************
+ * Lexical analysis *
+ ********************/
+
+/*
+ * Determine whether a string represents a literal floating point.
+ * Source: <http://stackoverflow.com/questions/5932391>.
+ */
+bool isDouble(string s) {
+    std::istringstream iss(s);
+    double d;
+    char c;
+    return iss >> d && !(iss >> c);
+}
+/*
+ * Determine if a string is a literal int.
+ * Source: <http://stackoverflow.com/questions/2844817>.
+ */
+bool isInteger(const std::string& s) {
+    if (s.empty() || ((!isdigit(s[0])) && (s[0] != '-') && (s[0] != '+')))
+        return false;
+    char * p;
+    strtol(s.c_str(), &p, 10);
+    return (*p == 0);
+}
+
+/*
+ * Main function for lexical analysis.
+ */
+token getToken() {
+    string curr;
+
+    if ( cin.eof() ) {
+        return token();  // EOS on end of file
+    }
+    cin >> curr;
+    if ( curr == "") {
+        return token();  // EOS on end of file
+    }
+
+    // Special (fixed) tokens:
+    if ( curr == "(" )
+        return token(curr, VOC_OPEN_PAREN);
+    if ( curr == ")" )
+        return token(curr, VOC_CLS_PAREN);
+    if ( curr == "{" )
+        return token(curr, VOC_OPEN_BRACE);
+    if ( curr == "}" )
+        return token(curr, VOC_CLS_BRACE);
+    if ( curr == "[" )
+        return token(curr, VOC_OPEN_SQPAR);
+    if ( curr == "]" )
+        return token(curr, VOC_CLS_SQPAR);
+    if ( curr == "if" )
+        return token(curr, VOC_IF);
+    if ( curr == "while" )
+        return token(curr, VOC_WHILE);
+    if ( curr == "else" )
+        return token(curr, VOC_ELSE);
+    if ( curr == "&&" )
+        return token(curr, VOC_AND);
+    if ( curr == "||" )
+        return token(curr, VOC_OR);
+    if ( curr == "=" )
+        return token(curr, VOC_ASSIGN);
+    if ( curr == "==" )
+        return token(curr, VOC_EQ);
+    if ( curr == "!=" )
+        return token(curr, VOC_NEQ);
+    if ( curr == "<=" )
+        return token(curr, VOC_LTEQ);
+    if ( curr == ">=" )
+        return token(curr, VOC_GTEQ);
+    if ( curr == "<" )
+        return token(curr, VOC_LT);
+    if ( curr == ">" )
+        return token(curr, VOC_GT);
+    if ( curr == "+" )
+        return token(curr, VOC_PLUS);
+    if ( curr == "-" )
+        return token(curr, VOC_MINUS);
+    if ( curr == "true" )
+        return token(curr, VOC_TRUE);
+    if ( curr == "false" )
+        return token(curr, VOC_FALSE);
+    if ( curr == "!" )
+        return token(curr, VOC_NOT);
+    if ( curr == "*" )
+        return token(curr, VOC_MUL);
+    if ( curr == "/" )
+        return token(curr, VOC_DIV);
+    if ( curr == ";" )
+        return token(curr, VOC_SEMICOLON);
+    if ( curr == "int" )
+        return token(curr, VOC_BASIC);
+    if ( curr == "char" )
+        return token(curr, VOC_BASIC);
+    if ( curr == "bool" )
+        return token(curr, VOC_BASIC);
+    if ( curr == "double" )
+        return token(curr, VOC_BASIC);
+
+    if (isInteger(curr)) {
+        // Integer literal:
+        return token(curr, VOC_NUM);
+    }
+    if (isDouble(curr)) {
+        // Floating point literal:
+        return token(curr, VOC_REAL);
+    }
+
+    // Everything else is an ID:
+    return token(curr, VOC_ID);
+}
+
+
+
+/****************************
+ * Recursive descent parser *
+ ****************************/
+
+/*
+ * Current token throughout the parsing process.
+ */
+token tok;
+
+/*
+ * Compares the current token with the argument.  If they are the same
+ * then obtains a new current token and returns.  Otherwise interrupts
+ * the parser.
+ */
+void mustBe(vocab v) {
+    if (v != tok.type) {
+        cerr << "Unexpected token: " << tok.str << "\n";
+        exit(1);
+    }
+    else tok = getToken();
+}
+
+/*
+ * Nonterminal functions as per the grammar given at the beginning of
+ * the file:
+ */
+
+node* Bool(); // forward declarations needed in Factor()
+node* Loc();
+
+// <factor>   ::= ( <bool> )
+//              | <loc>
+//              | NUM
+//              | REAL
+//              | TRUE
+//              | FALSE
+node* Factor() {
+    node* current = new node (NT_FACTOR);
+    switch(tok.type) {
+    case VOC_NUM:
+    case VOC_REAL:
+    case VOC_TRUE:
+    case VOC_FALSE:
+        current -> addChild(new node (tok));
+        tok = getToken();
+        break;
+    case VOC_ID:
+        current -> addChild(Loc());
+        break;
+    default:
+        mustBe(VOC_OPEN_PAREN);
+        current -> addChild(Bool());
+        mustBe(VOC_CLS_PAREN);
+    }
+    return current;
+}
+
+// <unary>    ::= ! <unary>
+//              | - <unary>
+//              | <factor>
+node* Unary() {
+    node* current = new node (NT_UNARY);
+    switch(tok.type) {
+    case VOC_NOT:
+    case VOC_MINUS:
+        current -> addChild(new node (tok));
+        tok = getToken();
+        current -> addChild(Unary());
+        break;
+    default:
+        current -> addChild(Factor());
+    }
+    return current;
+}
+
+// <termcl>   ::= e
+//              | * <unary> <termcl>
+//              | / <unary> <termcl>
+node* Termcl() {
+    node* current = new node (NT_TERMCL);
+    switch(tok.type) {
+    case VOC_MUL:
+    case VOC_DIV:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        current -> addChild(Unary());
+        current -> addChild(Termcl());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <term>     ::= <unary> <termcl>
+node* Term() {
+    node* current = new node (NT_TERM);
+    current -> addChild(Unary());
+    current -> addChild(Termcl());
+    return current;
+}
+
+// <exprcl>   ::= e
+//              | + <term> <exprcl>
+//              | - <term> <exprcl>
+node* Exprcl() {
+    node* current = new node (NT_EXPRCL);
+    switch(tok.type) {
+    case VOC_PLUS:
+    case VOC_MINUS:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        current -> addChild(Term());
+        current -> addChild(Exprcl());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <expr>     ::= <term> <exprcl>
+node* Expr() {
+    node* current = new node (NT_EXPR);
+    current -> addChild(Term());
+    current -> addChild(Exprcl());
+    return current;
+}
+
+// <reltail>  ::= e
+//              | <= <expr>
+//              | >= <expr>
+//              | > <expr>
+//              | < <expr>
+node* Reltail() {
+    node* current = new node (NT_RELTAIL);
+    switch(tok.type) {
+    case VOC_LTEQ:
+    case VOC_GTEQ:
+    case VOC_LT:
+    case VOC_GT:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        current -> addChild(Expr());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <rel>      ::= <expr> <reltail>
+node* Rel() {
+    node* current = new node (NT_REL);
+    current -> addChild(Expr());
+    current -> addChild(Reltail());
+    return current;
+}
+
+// <equalcl>  ::= e
+//              | == <rel> <equalcl>
+//              | != <rel> <equalcl>
+node* Equalcl() {
+    node* current = new node (NT_EQUALCL);
+    switch(tok.type) {
+    case VOC_EQ:
+    case VOC_NEQ:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        current -> addChild(Rel());
+        current -> addChild(Equalcl());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <equality> ::= <rel> <equalcl>
+node* Equality() {
+    node* current = new node (NT_EQUALITY);
+    current -> addChild(Rel());
+    current -> addChild(Equalcl());
+    return current;
+}
+
+// <joincl>   ::= e
+//              | && <equality> <joincl>
+node* Joincl() {
+    node* current = new node (NT_JOINCL);
+    switch(tok.type) {
+    case VOC_AND:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        current -> addChild(Equality());
+        current -> addChild(Joincl());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <join>     ::= <equality> <joincl>
+node* Join() {
+    node* current = new node (NT_JOIN);
+    current -> addChild(Equality());
+    current -> addChild(Joincl());
+    return current;
+}
+
+// <boolcl>   ::= e
+//              | || <join> <boolcl>
+node* Boolcl() {
+    node* current = new node (NT_BOOLCL);
+    switch(tok.type) {
+    case VOC_OR:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        current -> addChild(Join());
+        current -> addChild(Boolcl());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <bool>     ::= <join> <boolcl>
+node* Bool() {
+    node* current = new node (NT_BOOL);
+    current -> addChild(Join());
+    current -> addChild(Boolcl());
+    return current;
+}
+
+// <loccl>    ::= e
+//              | [ <bool> ] <loccl>
+node* Loccl() {
+    node* current = new node (NT_LOCCL);
+    switch(tok.type) {
+    case VOC_OPEN_SQPAR:
+        tok = getToken();
+        current -> addChild(Bool());
+        mustBe(VOC_CLS_SQPAR);
+        current -> addChild(Loccl());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <loc>      ::= ID <loccl>
+node* Loc() {
+    node* current = new node (NT_LOC);
+    current -> addChild(new node(tok));
+    mustBe(VOC_ID);
+    current -> addChild(Loccl());
+    return current;
+}
+
+node* Block(); // Forward declaration for Stmt()
+
+// <stmt>     ::= <loc> = <bool> ;
+//              | IF ( <bool> ) <stmt>
+//              | IF ( <bool> ) <stmt> ELSE <stmt>
+//              | WHILE ( <bool> ) <stmt>
+//              | <block>
+node* Stmt() {
+    node* current = new node (NT_STMT);
+    switch(tok.type) {
+    case VOC_IF:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        mustBe(VOC_OPEN_PAREN);
+        current -> addChild(Bool());
+        mustBe(VOC_CLS_PAREN);
+        current -> addChild(Stmt());
+        if (tok.type == VOC_ELSE) {
+            current -> addChild(new node(tok));
+            tok = getToken();
+            current -> addChild(Stmt());
+        }
+        break;
+    case VOC_WHILE:
+        current -> addChild(new node(tok));
+        tok = getToken();
+        mustBe(VOC_OPEN_PAREN);
+        current -> addChild(Bool());
+        mustBe(VOC_CLS_PAREN);
+        current -> addChild(Stmt());
+        break;
+    case VOC_OPEN_BRACE:
+        current -> addChild(Block());
+        break;
+    default:
+        current -> addChild(Loc());
+        current -> addChild(new node(tok));
+        mustBe(VOC_ASSIGN);
+        current -> addChild(Bool());
+        mustBe(VOC_SEMICOLON);
+        break;
+    }
+    return current;
+}
+
+// <stmts>    ::= e
+//              | <stmt> <stmts>
+node* Stmts() {
+    node* current = new node (NT_STMTS);
+    switch(tok.type) {
+    case VOC_CLS_BRACE: // More concise to start with Follow(<stmts>)
+        break;
+    default:
+        current -> addChild(Stmt());
+        current -> addChild(Stmts());
+        break;
+    }
+    return current;
+}
+
+// <typecl>   ::= e
+//              | [ NUM ] <typecl>
+node* Typecl() {
+    node* current = new node (NT_TYPECL);
+    switch(tok.type) {
+    case VOC_OPEN_SQPAR:
+        tok=getToken();
+        current -> addChild(new node(tok));
+        mustBe(VOC_NUM);
+        mustBe(VOC_CLS_SQPAR);
+        current -> addChild(Typecl());
+        break;
+    default:
+        break;
+    }
+    return current;
+}
+
+// <type>     ::= BASIC <typecl>
+node* Type() {
+    node* current = new node (NT_TYPE);
+    current -> addChild(new node(tok));
+    mustBe(VOC_BASIC);
+    current -> addChild(Typecl());
+    return current;
+}
+
+// <decl>     ::= <type> ID ;
+node* Decl() {
+    node* current = new node (NT_DECL);
+    current -> addChild(Type());
+    current -> addChild(new node(tok));
+    mustBe(VOC_ID);
+    mustBe(VOC_SEMICOLON);
+    return current;
+}
+
+// <decls>    ::= e
+//              | <decl> <decls>
+// Note: Follow(<decls>) = First(<stmt>) + Follow(<stmts>)
+node* Decls() {
+    node* current = new node (NT_DECLS);
+    switch(tok.type) {
+    case VOC_IF:
+    case VOC_WHILE:
+    case VOC_OPEN_BRACE:
+    case VOC_ID:
+    case VOC_CLS_BRACE:
+        break;
+    default:
+        current -> addChild(Decl());
+        current -> addChild(Decls());
+        break;
+    }
+    return current;
+}
+
+// <block>    ::= { <decls> <stmts> }
+node* Block() {
+    node* current = new node (NT_BLOCK);
+    mustBe(VOC_OPEN_BRACE);
+    current -> addChild(Decls());
+    current -> addChild(Stmts());
+    mustBe(VOC_CLS_BRACE);
+    return current;
+}
+
+// <program>  ::= <block>
+node* Program() {
+    node* current = new node (NT_PROGRAM);
+    current -> addChild(Block());
+    return current;
+}
+
+/*
+ Type checking
+ 
+ Perhaps this should be handled as a class
+ 
+ if type handled improperly than print error type and change correctness value
+ */
+class TypeCheck
+{
+private:
+    //Store reference to correctness of the types in the program from the main
+    bool& typeCorrectness;
+    
+    node* leftNode = nullptr;
+    node* rightNode = nullptr;
+    //Helper methods for the check type method
+    //Displaying error messages
+    void reportError(const string& message) {
+        cout << "Type Error: " << message << endl;
+        typeCorrectness = false;
+    }
+    //Checks if the current node is an assignment node and whether the assignment structure is respected
+    bool isProperAssignment(node* tree){
+        
+        node* middleNode = *(++tree->getChildren().begin());
+        if (!middleNode->isToken() or middleNode->getTermType() != VOC_ASSIGN) {
+            return false;
+        }
+        return true;
+    }
+    
+    //Check if assignment has consistent types
+    bool checkAssignment(node* node){
+        
+        leftNode = node->getChildren().front();
+        rightNode = node->getChildren().back();
+        
+        type leftType = leftNode->getType();
+        type rightType = rightNode->getType();
+        
+        if (leftType == rightType) return true;
+        
+        reportError("Incompatible types in assignment");
+        return false;
+    }
+    
+    //Check if array assignments have consistent types between between variable and array as well as between all indices of the array
+    
+    //Check for arithmetic op, relational op, equality op and logical op
+    bool checkExpression(node* node){
+        
+        
+        reportError("Incompatible types in expression");
+        return false;
+    }
+    //Validate array access type
+    bool checkArrayAccess(node* locNode){
+        
+        node* locClNode = locNode->getChildren().back();
+        node* indexExpr = *(++locClNode->getChildren().begin());
+        type indexType = indexExpr->getType();
+        if (indexType != TYPE_INT) {
+            reportError("Array index must be an integer expression");
+            return false;
+        }
+        
+        //Passes check
+        return true;
+    }
+    
+    
+    
+public:
+    //Constructor for tree (with specific cpp syntax for intializing variables with constructor
+    TypeCheck(bool& correctness) : typeCorrectness(correctness) {}
+    //Method that recursively decends the AST to (based on the grammar rules check the consistency of types across operations)
+    void checkType(node* tree)
+    {
+        //If no tree end check
+        if (!tree) return;
+        
+        //Check node based on nt type (breaks because there are no returns)
+        switch(tree->getNonTerminal()){
+            case NT_STMT:
+                /*
+                 Check if structure of stmt is that of assignment before verifying that the assignment uses proper types
+                 Ensure that we are only checking types and not the stucture this was done in the lexical analysis
+                 */
+                if (isProperAssignment(tree)){
+                    checkAssignment(tree);
+                }
+                break;
+            
+            case NT_EXPR:
+            case NT_BOOL:
+            case NT_EQUALITY:
+            case NT_REL:
+                checkExpression(tree);
+                break;
+                
+            //Check for array accessing
+            case NT_LOC:
+                /* If this is an array access, check it from the grammar rules for loc that follows NT_LOC
+                ├── ID ("x")
+                └── NT_LOCCL
+                    ├── NT_BOOL (contains 'i')
+                    └── NT_LOCCL (empty)
+                 */
+                if (!tree->getChildren().back()->getChildren().empty()) {
+                    checkArrayAccess(tree);
+                }
+                break;
+            //No type checking required for non terminal that doesn't match conditions
+            default:
+                break;
+        }
+        
+        //Recursively check all of the tree
+        for (node* child : tree->getChildren()){
+            checkType(child);
+        }
+    }
+    
+};
+    //Be able to traverse the AST and perform type inference
+    
+    //Can perform a recursive traversal
+    //To do this I need access to the children of the nodes which are private so I
+    //Need to make a new method to access a reference to the list of children of a node
+    //checkType(root.children, correctness)
+    
+    
+    /* When I use the getChildren method to go through the children of root how do I need to keep these so that I can check the types.
+     You check types by*/
+    
+    
+    /*
+     Needs to check types of variables and types of functions to ensure they have the proper returns
+     */
+
+
+/*
+ Scope checking
+ 
+ Perhaps this should be handled as a class
+ 
+ if scope handled improperly than print error scope and change correctness value
+ */
+class ScopeCheck
+{
+private:
+    //Correctness related to the scope of the program
+    bool& scopeCorrectness;
+    
+    //Helper methods to checkScope
+    
+    
+public:
+    //Constructor for tree
+    ScopeCheck(bool& correctness) : scopeCorrectness(correctness) {}
+    //Method for scopeChecking
+    void checkScope(node* root)
+    {
+        
+    }
+    
+    //Series of lists that allow us verify the scopes of variables
+    
+};
+
+
+int main() {
+    tok = getToken();
+    node* tree = Program();  // Call the axiom function to parse
+    mustBe(VOC_EOS);         /* That's how we know we have been successful!
+    Must end successfully creation of the parse tree than we know the structure is okay*/
+    
+   //Here the 2 classes will be instantiated and the 2 member functions that check type and scope will be called
+    
+    bool typeCorrectness = true;
+    bool scopeCorrectness = true;
+    
+    TypeCheck typeCheck(typeCorrectness);
+    typeCheck.checkType(tree);
+    
+    ScopeCheck scopeCheck(scopeCorrectness);
+    scopeCheck.checkScope(tree);
+    
+    
+    if (tree and typeCorrectness and scopeCorrectness) {
+        tree->print();
+        delete tree;
+        return 0;
+    }
+    else
+        return 1;
+}
+
