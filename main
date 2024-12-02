@@ -41,6 +41,7 @@
 #include <string>
 #include <sstream>
 #include <iostream>
+#include <unordered_set>
 using namespace std;
 
 /*
@@ -99,7 +100,6 @@ using namespace std;
                 | TRUE
                 | FALSE
  */
-
 
 /*
  * Nonterminals (used to label the nodes in the parse tree):
@@ -210,6 +210,71 @@ enum type {
     TYPE_INDEX,      // For array indexing
 };
 
+class SymbolTable {
+private:
+    struct Symbol {
+        string name;
+        type varType;
+        bool isArray;
+        int arraySize;
+        
+        Symbol(string n, type t, bool arr = false, int size = 0)
+                : name(n), varType(t), isArray(arr), arraySize(size) {
+                    cout << "SymbolTable initialized." << endl;
+                }
+    };
+    
+    vector<Symbol> symbols;
+    
+public:
+    
+    void addSymbol(const string& name, type t, bool isArray = false, int arraySize = 0) {
+        symbols.push_back(Symbol(name, t, isArray, arraySize));
+    }
+    
+    type getType(const string& name) {
+        cout << "Starting getType for: " << name << endl;
+        cout << "Current Symbol Table:" << endl;
+        for (const auto& sym : symbols) {
+                cout << "Name: " << sym.name << ", Type: " << sym.varType << endl;
+            }
+        for (const auto& sym : symbols) {
+                cout << "Checking symbol: " << sym.name << " against " << name << endl;  // Debugging
+                if (sym.name == name) {
+                    cout << "Symbol found: " << name << " with type " << sym.varType << endl;
+                    return sym.varType;
+                }
+            }
+            cout << "Symbol not found: " << name << endl;
+            return TYPE_ERROR;
+    }
+    
+    bool isArray(const string& name) {
+        for(const auto& sym : symbols) {
+            if(sym.name == name) {
+                return sym.isArray;
+            }
+        }
+        return false;
+    }
+    void print() const {
+        for(const auto& sym : symbols) {
+            string typeStr;
+            switch(sym.varType) {
+                case TYPE_INT: typeStr = "int"; break;
+                case TYPE_DOUBLE: typeStr = "double"; break;
+                case TYPE_FLOAT: typeStr = "float"; break;
+                case TYPE_BOOL: typeStr = "bool"; break;
+                case TYPE_CHAR: typeStr = "char"; break;
+                default: typeStr = "unknown"; break;
+            }
+            cout << sym.name << "\t" << typeStr << "\t" << "     "<<(sym.isArray ? "yes" : "no") << "       "<< sym.arraySize << "\t" << endl;
+        }
+    }
+};
+
+SymbolTable symbolTable;
+
 /*
  * Tokens are structures containing the actual string (the lexeme) and
  * also the type.
@@ -297,51 +362,155 @@ public:
     //Each node has has an enum property nt that states what kind of node it is
     //This is as opposed to tokens which are specifically for leaf nodes and wouldn't allow us to verify the type of whole equations or assignations
     type getType() {
-        switch(nt) {
-            //Node contains directly type -> return type
-            case NT_TYPE:
+        cout << "switch for nt in getType: " << nt << endl;
+        switch (nt) {
+            case NT_TYPE: {
+                cout << "Enter NT_TYPE" << endl;
+                if (isToken() && (term.type == VOC_NUM || term.type == VOC_REAL ||
+                                  term.type == VOC_TRUE || term.type == VOC_FALSE)) {
+                    cout << "NT_TYPE with a literal, treating as literal type: " << term.str << endl;
+                    return getLiteralType(term.type);
+                }
+                cout << "NT_TYPE returning: " << getBasicType(children.front()->term.str) << endl;
                 return getBasicType(children.front()->term.str);
-            //In a node declaration the first child is the node that contains the type
-            case NT_DECL:
-                return children.front()->getType();
-            //Handles type of a specific location (variables or arrays)
-            case NT_LOC:
-            {
-                //Checks type if its just a variable
-                type baseType = children.front()->getType();
-                /*
-                 Checks if array to return array type
-                 Based on <loccl>    ::= e
-                 | [ <bool> ] <loccl>  if the second child has children in this clause it should be a list
-                 */
-                if (children.back()->getChildren().empty()){
-                    return baseType;
-                }
-                /*
-                 Gives the array type that should be consistent through the whole array but does not check this
-                 */
-                else
-                {
-                    return getArrayType(baseType);
-                }
-                    
             }
+            case NT_DECL:
+                cout << "Enter NT_DECL" << endl;
+                return children.front()->getType();
+
+            case NT_LOC: {
+                cout << "Enter NT_LOC" << endl;
+                if (children.empty()) {
+                    cout << "NT_LOC has no children!" << endl;
+                    return TYPE_ERROR;
+                }
+                string varName = children.front()->printVal();
+                cout << "Looking up variable: " << varName << endl;
+                cout << "NT_LOC returning: " << symbolTable.getType(varName) << endl;
+                return symbolTable.getType(varName);
+            }
+            case NT_FACTOR: {
+                        cout << "Enter NT_FACTOR" << endl;
+                        if (isToken()) {
+                            cout << "NT_FACTOR returning terminal type: " << getLiteralType(term.type) << endl;
+                            return getLiteralType(term.type);
+                        }
+                        if (!children.empty()) {
+                            cout << "NT_FACTOR recursively checking child" << endl;
+                            return children.front()->getType();
+                        }
+                        cout << "NT_FACTOR has no valid children, returning TYPE_ERROR" << endl;
+                        return TYPE_ERROR;
+                    }
+           /* case NT_BOOL: {
+                cout << "Enter NT_BOOL" << endl;
+                if (children.empty()) {
+                    cout << "NT_BOOL has no children!" << endl;
+                    return TYPE_ERROR;
+                }
+                type joinType = children.front()->getType();  // Assume the first child is a join
+                if (joinType == TYPE_BOOL) {
+                    cout << "NT_BOOL returning TYPE_BOOL" << endl;
+                    return TYPE_BOOL;
+                }
+                cout << "NT_BOOL returning TYPE_ERROR" << endl;
+                return TYPE_ERROR;
+            }*/
+            /*
+            case NT_JOIN: {
+                cout << "Enter NT_JOIN" << endl;
+                if (children.size() < 2) {
+                    cout << "NT_JOIN has insufficient children!" << endl;
+                    return TYPE_ERROR;
+                }
+                auto leftType = children.front()->getType();  // Left child
+                auto rightType = children.back()->getType(); // Right child
+                if (leftType == TYPE_BOOL && rightType == TYPE_BOOL) {
+                    cout << "NT_JOIN returning TYPE_BOOL" << endl;
+                    return TYPE_BOOL;
+                }
+                cout << "NT_JOIN returning TYPE_ERROR due to type mismatch" << endl;
+                return TYPE_ERROR;
+            }*/
+
+            /*case NT_JOINCL: {
+                cout << "Enter NT_JOINCL" << endl;
+                if (children.empty()) {
+                    cout << "NT_JOINCL has no children!" << endl;
+                    return TYPE_ERROR;
+                }
+                for (auto child : children) {
+                    if (child->getType() != TYPE_BOOL) {
+                        cout << "NT_JOINCL returning TYPE_ERROR due to invalid child type" << endl;
+                        return TYPE_ERROR;
+                    }
+                }
+                cout << "NT_JOINCL returning TYPE_BOOL" << endl;
+                return TYPE_BOOL;
+            } */
                 
-            //Get type inference based on value
-            case NT_FACTOR:
-                if (children.front()->isToken()) {
-                    return getLiteralType(children.front()->getTermType());
-                            }
-                    return children.front()->getType();
-            //Get type of expression to facilitate type checking
-            case NT_BOOL:
             case NT_EXPR:
+            case NT_TERM:
+            case NT_UNARY:
             case NT_EQUALITY:
             case NT_REL:
-                return getExpressionType(nt);
+            case NT_JOIN:
+            case NT_BOOL:
+            case NT_DECLS:
+            case NT_STMTS:
+            case NT_TYPECL:
+            case NT_LOCCL:
+            case NT_BOOLCL:
+            case NT_JOINCL:
+            case NT_EQUALCL:
+            case NT_EXPRCL:
+            case NT_TERMCL:
+            case NT_RELTAIL: {
+                cout << "Enter recursive case for nt: " << nt << endl;
+                if (children.empty()) {
+                    cout << "No children for nt: " << nt << ", returning TYPE_ERROR" << endl;
+                    return TYPE_ERROR;
+                }
+                for (auto child : children) {
+                    type childType = child->getType();
+                    if (childType != TYPE_ERROR) {
+                        cout << "Found valid type: " << childType << " for nt: " << nt << endl;
+                        return childType;
+                    }
+                }
+                cout << "All children returned TYPE_ERROR for nt: " << nt << endl;
+                return TYPE_ERROR;
+            }
+
+            case NT_BLOCK: {
+                cout << "Enter NT_BLOCK" << endl;
+                if (children.empty()) {
+                    cout << "NT_BLOCK has no children!" << endl;
+                    return TYPE_ERROR;
+                }
+                cout << "NT_BLOCK delegating to first child" << endl;
+                return children.front()->getType();
+            }
+
+            case NT_PROGRAM: {
+                cout << "Enter NT_PROGRAM" << endl;
+                if (children.empty()) {
+                    cout << "NT_PROGRAM has no children!" << endl;
+                    return TYPE_ERROR;
+                }
+                cout << "NT_PROGRAM delegating to first child" << endl;
+                return children.front()->getType();
+            }
             
+            //Needs to stop once terminal node is encountered such as VOC_NUM, VOC_REAL this is after the <factor> node in the decent
+            case NT_TERMINAL: {
+                        cout << "Enter NT_TERMINAL" << endl;
+                        return getLiteralType(term.type);
+                    }
+
             default:
-                return  TYPE_ERROR;
+                cout << "getType returning TYPE_ERROR for nt: " << nt << endl;
+                return TYPE_ERROR;
         }
     }
     
@@ -994,110 +1163,332 @@ private:
     //Helper methods for the check type method
     //Displaying error messages
     void reportError(const string& message) {
-        cout << "Type Error: " << message << endl;
+        cout << endl << "------------" << endl << "Type Error: " << message << endl;
         typeCorrectness = false;
     }
-    //Checks if the current node is an assignment node and whether the assignment structure is respected
-    bool isProperAssignment(node* tree){
+    
+    bool checkAssignment(node* assignmentNode) {
+        cout << "Checking assignment operation" << endl;
+
+        // Extract LHS (left-hand side) and RHS (right-hand side) from the assignment node's children
+        auto children = assignmentNode->getChildren();
         
-        node* middleNode = *(++tree->getChildren().begin());
-        if (!middleNode->isToken() or middleNode->getTermType() != VOC_ASSIGN) {
+        // The first child is the LHS (variable being assigned)
+        node* lhsNode = children.front();
+
+        // The last child is the RHS (value or expression being assigned)
+        node* rhsNode = children.back();
+
+        // Get the types of the LHS and RHS
+        type lhsType = lhsNode->getType();
+        type rhsType = rhsNode->getType();
+        cout << lhsType << endl;
+        cout << rhsType << endl;
+
+        // Check if LHS is a valid variable or array element
+        if (lhsNode->getNonTerminal() != NT_LOC) {
+            reportError("Left-hand side of assignment is not a valid location");
             return false;
         }
+
+        // Ensure the LHS variable exists in the symbol table
+        string varName = lhsNode->getChildren().front()->printVal();
+        if (!checkVariableExists(varName)) {
+            return false;
+        }
+        /*
+        // If RHS is a boolean expression, validate it
+            if (lhsType == TYPE_BOOL && (rhsNode->getNonTerminal() == NT_BOOL || rhsNode->getNonTerminal() == NT_JOIN)) {
+                if (!checkBooleanOperation(rhsNode)) {
+                    reportError("Invalid boolean expression in assignment to: " + varName);
+                    return false;
+                }
+            }*/
+
+        // Check for type consistency between LHS and RHS
+        if (lhsType != rhsType) {
+            reportError("Type mismatch in assignment operation: " + varName +
+                        " (" + to_string(lhsType) + ") cannot be assigned " +
+                        to_string(rhsType));
+            return false;
+        }
+
+        cout << "Assignment operation is valid" << endl;
         return true;
     }
-    
-    //Check if assignment has consistent types
-    bool checkAssignment(node* node){
-        
-        leftNode = node->getChildren().front();
-        rightNode = node->getChildren().back();
-        
-        type leftType = leftNode->getType();
-        type rightType = rightNode->getType();
-        
-        if (leftType == rightType) return true;
-        
-        reportError("Incompatible types in assignment");
+
+    bool checkBooleanOperation(node* boolNode) {
+        cout <<"---------boolean---------"<< endl;
+        cout << "Checking boolean operation" << endl;
+            // Default case: Invalid node
+            reportError("Invalid boolean operation: non-terminal mismatch");
+            return false;
+        }
+    bool checkArithmeticOperation(node* node) {
+        cout << "Checking arithmetic operation" << endl;
+        reportError("Error in Arithmatic Operation");
+        return false;
+    }
+
+    bool checkRelationalOperation(node* node) {
+        cout << "Checking relational operation" << endl;
+        reportError("Error in Relational Operation");
+        return false;
+    }
+
+    bool checkEqualityOperation(node* node) {
+        cout << "Checking equality operation" << endl;
+        reportError("Error in Equality Operation");
+        return false;
+    }
+
+    bool checkArrayAccess(node* node) {
+        cout << "Checking array access operation" << endl;
+        reportError("Error in Array Access");
+        return false;
+    }
+
+    bool checkArrayDeclaration(node* node) {
+        cout << "Checking array declaration" << endl;
+        reportError("Error in array declaration");
         return false;
     }
     
     //Check if array assignments have consistent types between between variable and array as well as between all indices of the array
     
     //Check for arithmetic op, relational op, equality op and logical op
-    bool checkExpression(node* node){
-        
-        
-        reportError("Incompatible types in expression");
-        return false;
-    }
-    //Validate array access type
-    bool checkArrayAccess(node* locNode){
-        
-        node* locClNode = locNode->getChildren().back();
-        node* indexExpr = *(++locClNode->getChildren().begin());
-        type indexType = indexExpr->getType();
-        if (indexType != TYPE_INT) {
-            reportError("Array index must be an integer expression");
-            return false;
+    
+    bool checkVariableExists(const string& varName) {
+            if (symbolTable.getType(varName) == TYPE_ERROR) {
+                reportError("Variable not declared: " + varName);
+                return false;
+            }
+            return true;
         }
+
+        // Handles type checking for factor nodes
+        bool handleFactorChecking(node* tree) {
+            // Only check factors that are locations (variables)
+            
+            if (!tree->getChildren().empty() &&
+                tree->getChildren().front()->getNonTerminal() == NT_LOC) {
+                string varName = tree->getChildren().front()->getChildren().front()->printVal();
+                return checkVariableExists(varName);
+            }
+             
+            cout << "handleFactorChecking" << endl;
+            return true;
+        }
+
+        // Handles type checking for expressions
+        bool handleExpressionChecking(node* tree) {
+            
+            auto children = tree->getChildren();
+            for (node* child : children) {
+                if (child->getNonTerminal() == NT_LOC) {
+                    string varName = child->getChildren().front()->printVal();
+                    if (!checkVariableExists(varName)) {
+                        return false;
+                    }
+                    return checkArithmeticOperation(tree);
+                }
+            }
+             
+            cout<< "handleExpressionChecking" << endl;
+            return true;
+        }
+
+        // Handles type checking for equality operations
+        bool handleEqualityChecking(node* tree) {
+            
+            auto children = tree->getChildren();
+            node* leftExpr = children.front();
+            node* equalityCl = *(++children.begin());
+            
+            // Check left operand
+            if (leftExpr->getNonTerminal() == NT_LOC) {
+                string varName = leftExpr->getChildren().front()->printVal();
+                if (!checkVariableExists(varName)) {
+                    return false;
+                }
+            }
+            
+            // Check right operand if comparison exists
+            if (!equalityCl->getChildren().empty()) {
+                node* rightExpr = *(++equalityCl->getChildren().begin());
+                if (rightExpr->getNonTerminal() == NT_LOC) {
+                    string varName = rightExpr->getChildren().front()->printVal();
+                    if (!checkVariableExists(varName)) {
+                        return false;
+                    }
+                }
+                return checkEqualityOperation(tree);
+            }
+             
+            cout << "handleEqualityChecking" << endl;
+            return true;
+        }
+
+        // Handles type checking for statements (assignments)
+        bool handleStatementChecking(node* tree) {
+            
+            auto children = tree->getChildren();
+            if (children.size() >= 3 && (*++children.begin())->getTermType() == VOC_ASSIGN) {
+                node* leftNode = children.front();
+                string varName = leftNode->getChildren().front()->printVal();
+                
+                if (!checkVariableExists(varName)) {
+                    return false;
+                }
+                
+                if (symbolTable.isArray(varName)) {
+                    if (!checkArrayAccess(leftNode)) {
+                        return false;
+                    }
+                }
+                
+                return checkAssignment(tree);
+            }
+             
+            cout << "handleStatementChecking" << endl;
+            cout << "checks for assignment" << endl;
+            return true;
+        }
+
+        // Handles type checking for boolean operations
+        bool handleBooleanChecking(node* tree) {
+            
+            auto children = tree->getChildren();
+            for (node* child : children) {
+                if (child->getNonTerminal() == NT_LOC) {
+                    string varName = child->getChildren().front()->printVal();
+                    if (!checkVariableExists(varName)) {
+                        return false;
+                    }
+                    return checkBooleanOperation(tree);
+                }
+            }
+             
+            cout << "handleBooleanChecking" << endl;
+            return true;
+        }
+    
+    bool handleRelationalChecking(node* tree) {
         
-        //Passes check
-        return true;
-    }
-    
-    
+            // Get the children nodes of the relational operation
+            auto children = tree->getChildren();
+            
+            // In a relational operation, we have an expression and a reltail
+            // The expression is the left side, and reltail contains the operator and right side if they exist
+            node* leftExpr = children.front();
+            node* reltail = *(++children.begin());
+            
+            // First check if the left expression contains a variable that needs checking
+            if (leftExpr->getNonTerminal() == NT_LOC) {
+                string varName = leftExpr->getChildren().front()->printVal();
+                if (!checkVariableExists(varName)) {
+                    return false;
+                }
+            }
+            
+            // If reltail has children, we have a relational operation to check
+            // (If it's empty, there's no relational operator)
+            if (!reltail->getChildren().empty()) {
+                // The second child of reltail will be the right expression
+                node* rightExpr = *(++reltail->getChildren().begin());
+                
+                // Check if right side contains a variable
+                if (rightExpr->getNonTerminal() == NT_LOC) {
+                    string varName = rightExpr->getChildren().front()->printVal();
+                    if (!checkVariableExists(varName)) {
+                        return false;
+                    }
+                }
+                
+                // After checking variable existence, verify the relational operation types
+                return checkRelationalOperation(tree);
+            }
+            
+        cout << "handleRelationalChecking" << endl;
+            return true;
+        }
     
 public:
+    void printSymbolTable() {
+        cout << "\nSymbol Table Contents:" << endl;
+        cout << "=====================" << endl;
+        cout << "Name\tType\tIsArray\tArraySize" << endl;
+        cout << "---------------------" << endl;
+        
+        // Access symbols through SymbolTable's new print method
+        symbolTable.print();
+    }
     //Constructor for tree (with specific cpp syntax for intializing variables with constructor
     TypeCheck(bool& correctness) : typeCorrectness(correctness) {}
     //Method that recursively decends the AST to (based on the grammar rules check the consistency of types across operations)
-    void checkType(node* tree)
-    {
-        //If no tree end check
+    void checkType(node* tree) {
         if (!tree) return;
-        
-        //Check node based on nt type (breaks because there are no returns)
-        switch(tree->getNonTerminal()){
-            case NT_STMT:
-                /*
-                 Check if structure of stmt is that of assignment before verifying that the assignment uses proper types
-                 Ensure that we are only checking types and not the stucture this was done in the lexical analysis
-                 */
-                if (isProperAssignment(tree)){
-                    checkAssignment(tree);
-                }
-                break;
             
-            case NT_EXPR:
-            case NT_BOOL:
-            case NT_EQUALITY:
-            case NT_REL:
-                checkExpression(tree);
-                break;
-                
-            //Check for array accessing
-            case NT_LOC:
-                /* If this is an array access, check it from the grammar rules for loc that follows NT_LOC
-                ├── ID ("x")
-                └── NT_LOCCL
-                    ├── NT_BOOL (contains 'i')
-                    └── NT_LOCCL (empty)
-                 */
-                if (!tree->getChildren().back()->getChildren().empty()) {
-                    checkArrayAccess(tree);
+            switch(tree->getNonTerminal()) {
+                    /*
+                     Needs to handle the array after getting example array code from prof know how to propeerly write for the parser --not in this way--
+                     create placeholder method for adding array to symbol tree with decl
+                     */
+                case NT_DECL: {
+                    cout << "Is handling declaration" << endl;
+                    node* typeNode = tree->getChildren().front();
+                    node* idNode = *(++tree->getChildren().begin());
+                    type varType = typeNode->getType();
+                    string varName = idNode->printVal();
+                    
+                    //Does not handle the case for array declaration
+                    
+                    cout << "Adding symbol: " << varName << " with type: " << varType << endl;
+                    
+                    //Declared variable is added to the symbol table
+                    //symbolTable.addSymbol(varName, varType, false, 0);
+                    symbolTable.addSymbol(varName, varType);
+                    break;
                 }
-                break;
-            //No type checking required for non terminal that doesn't match conditions
-            default:
-                break;
+
+                
+                case NT_STMT: {
+                            handleStatementChecking(tree);
+                            break;
+                        }
+                
+                case NT_BOOL: {
+                            handleBooleanChecking(tree);
+                            break;
+                        }
+                        
+                        case NT_REL: {
+                            handleRelationalChecking(tree);
+                            break;
+                        }
+                        
+                        case NT_EXPR: {
+                            handleExpressionChecking(tree);
+                            break;
+                        }
+                        
+                        case NT_FACTOR: {
+                            handleFactorChecking(tree);
+                            break;
+                        }
+                        
+                        case NT_EQUALITY: {
+                            handleEqualityChecking(tree);
+                            break;
+                        }
+                default:
+                    break;
+            }
+
+            for (node* child : tree->getChildren()) {
+                checkType(child);
+            }
         }
-        
-        //Recursively check all of the tree
-        for (node* child : tree->getChildren()){
-            checkType(child);
-        }
-    }
     
 };
     //Be able to traverse the AST and perform type inference
@@ -1124,28 +1515,58 @@ public:
  
  if scope handled improperly than print error scope and change correctness value
  */
-class ScopeCheck
-{
+class ScopeCheck {
 private:
-    //Correctness related to the scope of the program
     bool& scopeCorrectness;
+    vector<unordered_set<string>> scopeStack;
     
-    //Helper methods to checkScope
-    
-    
-public:
-    //Constructor for tree
-    ScopeCheck(bool& correctness) : scopeCorrectness(correctness) {}
-    //Method for scopeChecking
-    void checkScope(node* root)
-    {
-        
+    void reportError(const string& message) {
+        cout << "Scope Error: " << message << endl;
+        scopeCorrectness = false;
     }
     
-    //Series of lists that allow us verify the scopes of variables
+    void enterScope() {
+        cout << "enterScope" << endl;
+        scopeStack.push_back(unordered_set<string>());
+    }
     
-};
+    void exitScope() {
+        cout << "exitScope" << endl;
+        if (!scopeStack.empty()) {
+            scopeStack.pop_back();
+        }
+    }
 
+public:
+    ScopeCheck(bool& correctness) : scopeCorrectness(correctness) {
+        cout << "ScopeCheck" << endl;
+        enterScope(); // Start with global scope
+    }
+    
+    void checkScope(node* root) {
+        cout << "checkScope" << endl;
+        if (!root) return;
+        
+        switch(root->getNonTerminal()) {
+            case NT_BLOCK: {
+                enterScope();
+                for (node* child : root->getChildren()) {
+                    checkScope(child);
+                }
+                exitScope();
+                break;
+            }
+            default:
+                break;
+        }
+        
+        if (root->getNonTerminal() != NT_BLOCK) {
+            for (node* child : root->getChildren()) {
+                checkScope(child);
+            }
+        }
+    }
+};
 
 int main() {
     tok = getToken();
@@ -1158,14 +1579,17 @@ int main() {
     bool typeCorrectness = true;
     bool scopeCorrectness = true;
     
+    cout << "Type Checking sequence:" << endl;
     TypeCheck typeCheck(typeCorrectness);
     typeCheck.checkType(tree);
-    
+    cout << "Scope Checking sequence:" << endl;
     ScopeCheck scopeCheck(scopeCorrectness);
     scopeCheck.checkScope(tree);
     
+    typeCheck.printSymbolTable();
     
-    if (tree and typeCorrectness and scopeCorrectness) {
+    if (tree) {
+        cout << "Lexical Analysis sequence:" << endl;
         tree->print();
         delete tree;
         return 0;
